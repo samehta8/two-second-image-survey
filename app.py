@@ -43,6 +43,14 @@ with st.sidebar:
     except Exception:
         st.write("Service account:", "(not loaded)")
 
+    # --- Current participant info (debug panel) ---
+    st.subheader("Current participant fields")
+    st.write("participant_id:", st.session_state.get("participant_id"))
+    st.write("name:", st.session_state.get("name"))
+    st.write("age:", st.session_state.get("age"))
+    st.write("gender:", st.session_state.get("gender"))
+    st.write("nationality:", st.session_state.get("nationality"))
+
 # -------------------- Google Sheets I/O (optional) --------------------
 def get_worksheet():
     """
@@ -278,24 +286,47 @@ Your participation is voluntary. You may stop at any time.
 # ===== DEMOGRAPHICS =====
 elif st.session_state.phase == "demographics":
     st.title("Participant Information")
+
     with st.form("demographics"):
-        st.text_input("Full name", key="name")
-        st.number_input("Age", min_value=1, step=1, key="age", value=st.session_state.age or 18)
-        st.selectbox(
-            "Gender",
-            ["", "Female", "Male", "Non-binary / Other", "Prefer not to say"],
-            key="gender",
+        name_input = st.text_input("Full name", value=st.session_state.get("name", ""))
+        age_input = st.number_input(
+            "Age", min_value=1, step=1,
+            value=int(st.session_state.get("age", 18)) or 18
         )
-        st.text_input("Nationality", key="nationality")
+        gender_choices = ["", "Female", "Male", "Non-binary / Other", "Prefer not to say"]
+        gender_input = st.selectbox(
+            "Gender",
+            gender_choices,
+            index=0 if not st.session_state.get("gender") else gender_choices.index(st.session_state.get("gender"))
+        )
+        nationality_input = st.text_input("Nationality", value=st.session_state.get("nationality", ""))
+
         submitted = st.form_submit_button("Start survey")
         if submitted:
-            if can_start_demographics():
-                st.session_state.order = randomize_order(total_images, seed=st.session_state.participant_id)
+            # write widget values explicitly into session_state
+            st.session_state.name = name_input.strip()
+            try:
+                st.session_state.age = int(age_input)
+            except Exception:
+                st.session_state.age = 0
+            st.session_state.gender = gender_input.strip()
+            st.session_state.nationality = nationality_input.strip()
+
+            if (
+                st.session_state.name
+                and st.session_state.gender
+                and st.session_state.nationality
+                and st.session_state.age > 0
+            ):
+                st.session_state.order = randomize_order(
+                    len(st.session_state.images), seed=st.session_state.participant_id
+                )
                 st.session_state.idx = 0
                 st.session_state.show_started_at = None
                 advance("show")
             else:
                 st.error("Please complete all demographic fields before starting.")
+
 
 # ===== SHOW (Stable 2s display without autorefresh) =====
 elif st.session_state.phase == "show":
