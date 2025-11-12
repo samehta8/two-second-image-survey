@@ -1,19 +1,21 @@
-# app.py  — Single-mode: Images (2s) → Sliders + Result estimate
-# Includes Google Sheets saving + a debug sidebar
+# app.py — Single-mode: Images (2s) → Sliders + Result estimate
+# Responsive image sizing + Google Sheets saving + debug sidebar
 
+# --- imports ---
 import time
 import uuid
 import random
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any
+import base64
 
 import pandas as pd
 import streamlit as st
 
 # ======================== CONFIG ========================
 IMAGE_DIR = Path("images")     # put your images here
-MAX_IMAGES = 30                # cap (you can change)
+MAX_IMAGES = 30                # cap (change if needed)
 SHOW_SECONDS = 2.0             # exact exposure in seconds
 EMOTIONS = [
     "Angry", "Happy", "Sad", "Scared",
@@ -26,24 +28,40 @@ try:
     SHEET_URL = st.secrets["google_sheets"]["sheet_url"]
 except Exception:
     SHEET_URL = ""
-# ========================================================
 
 st.set_page_config(page_title="2-Second Image Emotion Survey", layout="centered")
+
+# --- responsive image helper (no scrolling) ---
+def render_image_responsive(path: str, max_vw: int = 80, max_vh: int = 70):
+    """
+    Show an image centered, scaled to at most max_vw% of viewport width
+    and max_vh% of viewport height. Keeps aspect ratio, no scrolling.
+    """
+    data = Path(path).read_bytes()
+    b64 = base64.b64encode(data).decode("utf-8")
+    ext = Path(path).suffix.lower().lstrip(".")
+    mime = "image/jpeg" if ext in {"jpg", "jpeg"} else f"image/{ext}"
+    st.markdown(
+        f"""
+        <div style="display:flex;justify-content:center;">
+          <img src="data:{mime};base64,{b64}"
+               style="max-width:{max_vw}vw; max-height:{max_vh}vh;
+                      width:auto; height:auto; border-radius:12px;" />
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 # --- DEBUG STATUS PANEL (sidebar) ---
 with st.sidebar:
     st.header("Data Save Status")
-    # Is sheet_url set?
     st.write("Sheet URL set:", bool(SHEET_URL))
-
-    # Do we see a service account email?
     try:
         sa_email = st.secrets["google_service_account"]["client_email"]
         st.write("Service account:", sa_email)
     except Exception:
         st.write("Service account:", "(not loaded)")
 
-    # --- Current participant info (debug panel) ---
     st.subheader("Current participant fields")
     st.write("participant_id:", st.session_state.get("participant_id"))
     st.write("name:", st.session_state.get("name"))
@@ -55,12 +73,9 @@ with st.sidebar:
 def get_worksheet():
     """
     Returns an authorized gspread worksheet for appending rows.
-    Requires Streamlit secrets to contain:
-      [google_sheets]
-      sheet_url = "..."
-      [google_service_account]
-      ... (service account JSON fields)
-    If secrets are missing, returns None (no-op).
+    Requires Streamlit secrets:
+      [google_sheets] sheet_url = "..."
+      [google_service_account] ... (service account JSON fields)
     """
     if not SHEET_URL:
         st.warning("Sheets: SHEET_URL is empty; skipping connection.")
@@ -77,12 +92,10 @@ def get_worksheet():
         credentials = Credentials.from_service_account_info(sa_info, scopes=scopes)
         gc = gspread.authorize(credentials)
         sh = gc.open_by_url(SHEET_URL)
-        # Use or create a worksheet named "responses"
         try:
             ws = sh.worksheet("responses")
         except gspread.WorksheetNotFound:
             ws = sh.add_worksheet(title="responses", rows=2000, cols=40)
-            # Header row — matches the rows we append below
             ws.append_row([
                 "study_id", "participant_id", "consented", "consent_timestamp_iso",
                 "name", "age", "gender", "nationality",
@@ -95,11 +108,11 @@ def get_worksheet():
         st.success("✔ Connected to Google Sheet.")
         return ws
     except Exception as e:
+        import traceback
         st.error(f"Google Sheets connection error: {type(e).__name__}: {e}")
+        st.code(traceback.format_exc())
         st.info("Common fixes: share the Sheet with the service account (Editor), enable Google Sheets + Drive APIs, and check secrets formatting.")
         return None
-
-
 
 def append_row_to_sheet(ws, row: Dict[str, Any]):
     """Append a single trial row to Google Sheets (safe no-op if ws is None)."""
@@ -148,27 +161,21 @@ def init_state():
     ss.setdefault("phase", "consent")   # consent -> demographics -> show -> rate -> done
     ss.setdefault("study_id", "image_emotion_survey_v5")
 
-    # images & order
     ss.setdefault("images", load_images(IMAGE_DIR, MAX_IMAGES))
-    ss.setdefault("order", [])      # list of indices into images list
-    ss.setdefault("idx", 0)         # current index into order
+    ss.setdefault("order", [])
+    ss.setdefault("idx", 0)
 
-    # show-phase timing
-    ss.setdefault("show_started_at", None)  # float epoch seconds
+    ss.setdefault("show_started_at", None)
 
-    # participant info
     ss.setdefault("consented", False)
     ss.setdefault("consent_timestamp_iso", "")
-    ss.setdefault("participant_id", "")   # auto-generated unless user overrides
+    ss.setdefault("participant_id", "")
     ss.setdefault("name", "")
     ss.setdefault("age", 0)
     ss.setdefault("gender", "")
     ss.setdefault("nationality", "")
 
-    # responses
     ss.setdefault("responses", [])
-
-    # google sheets
     ss.setdefault("ws", None)
 
 def generate_participant_id() -> str:
@@ -224,19 +231,16 @@ def record_and_next(sliders: Dict[str, int], result_estimate: str):
         "age": ss.age,
         "gender": ss.gender,
         "nationality": ss.nationality,
-        "trial_index": img_idx + 1,           # original index in file order (1-based)
-        "order_index": order_index,           # position in the randomized sequence (1-based)
+        "trial_index": img_idx + 1,
+        "order_index": order_index,
         "image_file": img.name,
         **ratings,
-        "result_estimate": result_estimate,   # "Won", "Lost", or "Unsure"
+        "result_estimate": result_estimate,
         "response_timestamp_iso": datetime.utcnow().isoformat() + "Z",
     }
     ss.responses.append(row)
-
-    # Append immediately to Google Sheets (no-op if ws is None)
     append_row_to_sheet(ss.ws, row)
 
-    # advance index / phase
     ss.idx += 1
     ss.show_started_at = None
     ss.phase = "done" if ss.idx >= total else "show"
@@ -254,7 +258,7 @@ if total_images == 0:
 if st.session_state.ws is None and SHEET_URL:
     st.session_state.ws = get_worksheet()
 
-# progress bar
+# progress
 st.progress(st.session_state.idx / total_images if total_images else 0.0)
 
 # ===== CONSENT =====
@@ -263,13 +267,12 @@ if st.session_state.phase == "consent":
     st.write("""
 This study shows a series of images for **2 seconds each**. After each image, 
 you will rate several **emotions (0–100)** describing the expression you saw,
-and indicate a **Result estimate** (Won / Lost / Unsure).  
+and indicate a **Result estimate** (Won / Lost / Unsure).
 Your participation is voluntary. You may stop at any time.
     """)
 
     agreed = st.checkbox("I consent to participate.")
 
-    # Participant ID (auto, but editable)
     if not st.session_state.participant_id:
         st.session_state.participant_id = generate_participant_id()
     st.caption("A unique participant ID has been generated. You may override it if needed.")
@@ -303,7 +306,6 @@ elif st.session_state.phase == "demographics":
 
         submitted = st.form_submit_button("Start survey")
         if submitted:
-            # write widget values explicitly into session_state
             st.session_state.name = name_input.strip()
             try:
                 st.session_state.age = int(age_input)
@@ -327,8 +329,7 @@ elif st.session_state.phase == "demographics":
             else:
                 st.error("Please complete all demographic fields before starting.")
 
-
-# ===== SHOW (Stable 2s display without autorefresh) =====
+# ===== SHOW (Stable 2s display, responsive image) =====
 elif st.session_state.phase == "show":
     i = st.session_state.idx
     img_idx = st.session_state.order[i]
@@ -341,8 +342,7 @@ elif st.session_state.phase == "show":
     remaining = SHOW_SECONDS - elapsed
 
     st.subheader(f"Image {i+1} of {total_images}")
-    st.image(str(current_img), width=800)
-
+    render_image_responsive(str(current_img), max_vw=80, max_vh=70)
 
     if remaining > 0:
         st.caption(f"Next screen in {max(0.0, remaining):.1f}s…")
@@ -366,7 +366,6 @@ elif st.session_state.phase == "rate":
                 emo, RATING_MIN, RATING_MAX, RATING_DEFAULT, key=f"{emo}_{i}"
             )
 
-        # Result estimate (required)
         result_estimate = st.radio(
             "Result estimate (what do you think happened in the match?)",
             ["Won", "Lost", "Unsure"],
