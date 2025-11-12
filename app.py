@@ -1,4 +1,6 @@
-# app.py
+# app.py  — Single-mode: Images (2s) → Sliders + Result estimate
+# Includes Google Sheets saving + a debug sidebar
+
 import time
 import uuid
 import random
@@ -10,16 +12,16 @@ import pandas as pd
 import streamlit as st
 
 # ======================== CONFIG ========================
-IMAGE_DIR = Path("images")
-MAX_IMAGES = 30
-SHOW_SECONDS = 2.0
+IMAGE_DIR = Path("images")     # put your images here
+MAX_IMAGES = 30                # cap (you can change)
+SHOW_SECONDS = 2.0             # exact exposure in seconds
 EMOTIONS = [
     "Angry", "Happy", "Sad", "Scared",
     "Surprised", "Neutral", "Disgusted", "Contempt",
 ]
 RATING_MIN, RATING_MAX, RATING_DEFAULT = 0, 100, 0
 
-# Google Sheets (optional)
+# Optional Google Sheets (safe to leave empty locally)
 try:
     SHEET_URL = st.secrets["google_sheets"]["sheet_url"]
 except Exception:
@@ -28,9 +30,32 @@ except Exception:
 
 st.set_page_config(page_title="2-Second Image Emotion Survey", layout="centered")
 
+# --- DEBUG STATUS PANEL (sidebar) ---
+with st.sidebar:
+    st.header("Data Save Status")
+    # Is sheet_url set?
+    st.write("Sheet URL set:", bool(SHEET_URL))
+
+    # Do we see a service account email?
+    try:
+        sa_email = st.secrets["google_service_account"]["client_email"]
+        st.write("Service account:", sa_email)
+    except Exception:
+        st.write("Service account:", "(not loaded)")
+
 # -------------------- Google Sheets I/O (optional) --------------------
 def get_worksheet():
+    """
+    Returns an authorized gspread worksheet for appending rows.
+    Requires Streamlit secrets to contain:
+      [google_sheets]
+      sheet_url = "..."
+      [google_service_account]
+      ... (service account JSON fields)
+    If secrets are missing, returns None (no-op).
+    """
     if not SHEET_URL:
+        st.warning("Sheets: SHEET_URL is empty; skipping connection.")
         return None
     try:
         import gspread
@@ -44,10 +69,12 @@ def get_worksheet():
         credentials = Credentials.from_service_account_info(sa_info, scopes=scopes)
         gc = gspread.authorize(credentials)
         sh = gc.open_by_url(SHEET_URL)
+        # Use or create a worksheet named "responses"
         try:
             ws = sh.worksheet("responses")
         except gspread.WorksheetNotFound:
             ws = sh.add_worksheet(title="responses", rows=2000, cols=40)
+            # Header row — matches the rows we append below
             ws.append_row([
                 "study_id", "participant_id", "consented", "consent_timestamp_iso",
                 "name", "age", "gender", "nationality",
@@ -57,13 +84,17 @@ def get_worksheet():
                 "result_estimate",
                 "response_timestamp_iso"
             ])
+        st.success("✔ Connected to Google Sheet.")
         return ws
-    except Exception:
+    except Exception as e:
+        st.error(f"Google Sheets connection error: {e}")
         return None
 
 
 def append_row_to_sheet(ws, row: Dict[str, Any]):
+    """Append a single trial row to Google Sheets (safe no-op if ws is None)."""
     if ws is None:
+        st.warning("Sheets: no worksheet; not writing.")
         return
     ordered = [
         row.get("study_id", ""),
@@ -90,8 +121,9 @@ def append_row_to_sheet(ws, row: Dict[str, Any]):
     ]
     try:
         ws.append_row(ordered, value_input_option="RAW")
-    except Exception:
-        pass
+        st.toast("Saved to Google Sheet ✅", icon="✅")
+    except Exception as e:
+        st.error(f"Failed to append to Google Sheets: {e}")
 
 # -------------------- Helpers --------------------
 def load_images(dirpath: Path, max_n: int) -> List[Path]:
@@ -103,23 +135,30 @@ def load_images(dirpath: Path, max_n: int) -> List[Path]:
 
 def init_state():
     ss = st.session_state
-    ss.setdefault("phase", "consent")
-    ss.setdefault("study_id", "image_emotion_survey_v4")
+    ss.setdefault("phase", "consent")   # consent -> demographics -> show -> rate -> done
+    ss.setdefault("study_id", "image_emotion_survey_v5")
 
+    # images & order
     ss.setdefault("images", load_images(IMAGE_DIR, MAX_IMAGES))
-    ss.setdefault("order", [])
-    ss.setdefault("idx", 0)
-    ss.setdefault("show_started_at", None)
+    ss.setdefault("order", [])      # list of indices into images list
+    ss.setdefault("idx", 0)         # current index into order
 
+    # show-phase timing
+    ss.setdefault("show_started_at", None)  # float epoch seconds
+
+    # participant info
     ss.setdefault("consented", False)
     ss.setdefault("consent_timestamp_iso", "")
-    ss.setdefault("participant_id", "")
+    ss.setdefault("participant_id", "")   # auto-generated unless user overrides
     ss.setdefault("name", "")
     ss.setdefault("age", 0)
     ss.setdefault("gender", "")
     ss.setdefault("nationality", "")
 
+    # responses
     ss.setdefault("responses", [])
+
+    # google sheets
     ss.setdefault("ws", None)
 
 def generate_participant_id() -> str:
@@ -175,16 +214,19 @@ def record_and_next(sliders: Dict[str, int], result_estimate: str):
         "age": ss.age,
         "gender": ss.gender,
         "nationality": ss.nationality,
-        "trial_index": img_idx + 1,
-        "order_index": order_index,
+        "trial_index": img_idx + 1,           # original index in file order (1-based)
+        "order_index": order_index,           # position in the randomized sequence (1-based)
         "image_file": img.name,
         **ratings,
-        "result_estimate": result_estimate,
+        "result_estimate": result_estimate,   # "Won", "Lost", or "Unsure"
         "response_timestamp_iso": datetime.utcnow().isoformat() + "Z",
     }
     ss.responses.append(row)
+
+    # Append immediately to Google Sheets (no-op if ws is None)
     append_row_to_sheet(ss.ws, row)
 
+    # advance index / phase
     ss.idx += 1
     ss.show_started_at = None
     ss.phase = "done" if ss.idx >= total else "show"
@@ -192,15 +234,18 @@ def record_and_next(sliders: Dict[str, int], result_estimate: str):
 
 # -------------------- App Flow --------------------
 init_state()
+
 total_images = len(st.session_state.images)
 if total_images == 0:
     st.error(f"No images found in `{IMAGE_DIR}/`. Add up to {MAX_IMAGES} images and reload.")
     st.stop()
 
-st.progress(st.session_state.idx / total_images if total_images else 0.0)
-
+# One-time connect to Sheets (if configured)
 if st.session_state.ws is None and SHEET_URL:
     st.session_state.ws = get_worksheet()
+
+# progress bar
+st.progress(st.session_state.idx / total_images if total_images else 0.0)
 
 # ===== CONSENT =====
 if st.session_state.phase == "consent":
@@ -208,10 +253,13 @@ if st.session_state.phase == "consent":
     st.write("""
 This study shows a series of images for **2 seconds each**. After each image, 
 you will rate several **emotions (0–100)** describing the expression you saw,
-and indicate a **Result estimate** (Won / Lost / Unsure).
+and indicate a **Result estimate** (Won / Lost / Unsure).  
+Your participation is voluntary. You may stop at any time.
     """)
 
     agreed = st.checkbox("I consent to participate.")
+
+    # Participant ID (auto, but editable)
     if not st.session_state.participant_id:
         st.session_state.participant_id = generate_participant_id()
     st.caption("A unique participant ID has been generated. You may override it if needed.")
@@ -231,7 +279,11 @@ elif st.session_state.phase == "demographics":
     with st.form("demographics"):
         st.text_input("Full name", key="name")
         st.number_input("Age", min_value=1, step=1, key="age", value=st.session_state.age or 18)
-        st.selectbox("Gender", ["", "Female", "Male", "Non-binary / Other", "Prefer not to say"], key="gender")
+        st.selectbox(
+            "Gender",
+            ["", "Female", "Male", "Non-binary / Other", "Prefer not to say"],
+            key="gender",
+        )
         st.text_input("Nationality", key="nationality")
         submitted = st.form_submit_button("Start survey")
         if submitted:
@@ -241,9 +293,9 @@ elif st.session_state.phase == "demographics":
                 st.session_state.show_started_at = None
                 advance("show")
             else:
-                st.error("Please complete all fields before starting.")
+                st.error("Please complete all demographic fields before starting.")
 
-# ===== SHOW (Stable 2s display) =====
+# ===== SHOW (Stable 2s display without autorefresh) =====
 elif st.session_state.phase == "show":
     i = st.session_state.idx
     img_idx = st.session_state.order[i]
@@ -259,8 +311,7 @@ elif st.session_state.phase == "show":
     st.image(str(current_img), use_container_width=True)
 
     if remaining > 0:
-        # non-blocking timer refresh
-        st.markdown(f"<p style='text-align:center;'>Next screen in {remaining:.1f}s...</p>", unsafe_allow_html=True)
+        st.caption(f"Next screen in {max(0.0, remaining):.1f}s…")
         time.sleep(0.1)
         st.rerun()
     else:
@@ -270,14 +321,18 @@ elif st.session_state.phase == "show":
 elif st.session_state.phase == "rate":
     i = st.session_state.idx
     pos_1based = i + 1
+
     st.subheader(f"Rate the last image ({pos_1based} of {total_images})")
-    st.caption("Rate the emotions and result estimate below.")
+    st.caption("Please rate based on your memory. Move each slider to indicate intensity (0–100).")
 
     with st.form(key=f"ratings_form_{i}"):
         sliders = {}
         for emo in EMOTIONS:
-            sliders[emo] = st.slider(emo, RATING_MIN, RATING_MAX, RATING_DEFAULT, key=f"{emo}_{i}")
+            sliders[emo] = st.slider(
+                emo, RATING_MIN, RATING_MAX, RATING_DEFAULT, key=f"{emo}_{i}"
+            )
 
+        # Result estimate (required)
         result_estimate = st.radio(
             "Result estimate (what do you think happened in the match?)",
             ["Won", "Lost", "Unsure"],
@@ -293,16 +348,10 @@ elif st.session_state.phase == "rate":
             else:
                 record_and_next(sliders, result_estimate=result_estimate)
 
+    st.button("Back (disabled during study)", disabled=True)
+
 # ===== DONE =====
 elif st.session_state.phase == "done":
     st.success("All done — thank you for participating!")
-    df = pd.DataFrame(st.session_state.responses)
-    st.dataframe(df, use_container_width=True)
-    csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label="Download responses as CSV",
-        data=csv,
-        file_name=f"survey_responses_{st.session_state.participant_id}_{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}.csv",
-        mime="text/csv",
-    )
-    st.info("You may close this window.")
+    st.write("Your responses have been recorded.")
+    st.info("You may now close this window.")
