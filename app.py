@@ -341,7 +341,8 @@ elif st.session_state.phase == "show":
     remaining = SHOW_SECONDS - elapsed
 
     st.subheader(f"Image {i+1} of {total_images}")
-    st.image(str(current_img), use_container_width=True)
+    st.image(str(current_img), width=800)
+
 
     if remaining > 0:
         st.caption(f"Next screen in {max(0.0, remaining):.1f}s…")
