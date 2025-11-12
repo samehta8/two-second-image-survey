@@ -87,8 +87,10 @@ def get_worksheet():
         st.success("✔ Connected to Google Sheet.")
         return ws
     except Exception as e:
-        st.error(f"Google Sheets connection error: {e}")
+        st.error(f"Google Sheets connection error: {type(e).__name__}: {e}")
+        st.info("Common fixes: share the Sheet with the service account (Editor), enable Google Sheets + Drive APIs, and check secrets formatting.")
         return None
+
 
 
 def append_row_to_sheet(ws, row: Dict[str, Any]):
